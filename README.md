@@ -168,3 +168,25 @@ codearts-multica-runtime/
 | `Model not found` | session directory 未对齐 | 确保 createSession 使用 `?directory=C:/codeartsproject` |
 | `并发会话数已达上限` | kernel 限制 3 个并发 session | 重启 kernel 清除旧 session |
 | agent 跑偏/超时 | 正常 agent 行为 | daemon 超时 kill，重试即可 |
+| kernel 重启后 `Model not found` | IDE 扩展未自动重推配置 | 见下方 [kernel 重启恢复](#kernel-重启恢复) |
+
+### kernel 重启恢复
+
+执行 `taskkill /F /IM AgentKernel*` 后，IDE 会自动拉起新 kernel 进程，但**不会自动同步自定义模型和 MCP 配置**。需要手动注入：
+
+```powershell
+# 获取当前 kernel 端口
+$port = (Select-String -Path "$env:USERPROFILE\.codeartsdoer\CodeArts_Agent\*\server_config.properties" -Pattern 'port=(\d+)').Matches.Groups[1].Value
+$auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("codearts:${env:OPENCODE_SERVER_PASSWORD}"))
+
+# 注册自定义模型
+$body = '{"source_type":"custom","provider":"inferhub-provider","model_name":"deepseek-v4-pro","model_id":"deepseek-v4-pro","model_url":"https://opengw.cloudcreator.club/v1","api_format":"openai","is_custom_model":true,"context_window":200000,"display_enabled":true}'
+Invoke-RestMethod -Uri "http://localhost:$port/cag/model/init" -Method POST -Headers @{Authorization="Basic $auth";"Content-Type"="application/json"} -Body $body
+
+# 更新全局 provider 配置
+$body = '{"provider":{"inferhub-provider":{"name":"inferhub-provider","models":{"deepseek-v4-pro":{"id":"deepseek-v4-pro","reasoning":true,"limit":{"context":200000,"output":16000,"input":184000}}}}}}'
+Invoke-RestMethod -Uri "http://localhost:$port/cag/global/config" -Method PATCH -Headers @{Authorization="Basic $auth";"Content-Type"="application/json"} -Body $body
+
+# 重启 daemon
+multica daemon restart
+```
