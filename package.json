@@ -1,0 +1,23 @@
+{
+  "name": "codearts-multica-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CodeArts Agent runtime bridge for Multica",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "~5.8.0",
+    "vitest": "^4.1.0"
+  }
+}
