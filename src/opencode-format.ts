@@ -4,10 +4,16 @@ let sessionId: string | undefined
 let requestId: string | undefined
 let promptText: string | undefined
 let promptEchoSkipped = false
+let latestUsage: { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number } = {}
+let partSeq = 0
+
+function nextSeq(): number { return ++partSeq }
 
 export function opencodeInit(sid: string, rid: string): void {
   sessionId = sid
   requestId = rid
+  latestUsage = {}
+  partSeq = 0
 }
 
 export function opencodeSetPrompt(prompt: string): void {
@@ -17,6 +23,7 @@ export function opencodeSetPrompt(prompt: string): void {
 
 export function toOpenCodeFrame(frame: OutboundFrame): string {
   const ts = Date.now()
+  const seq = nextSeq()
 
   switch (frame.type) {
     case 'ready':
@@ -28,7 +35,7 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'step_start',
         timestamp: ts,
         sessionID: frame.session_id,
-        part: { id: `part_${ts}`, messageID: `msg_${ts}`, sessionID: frame.session_id, type: 'step-start' },
+        part: { id: `prt_${seq}`, messageID: `msg_${seq}`, sessionID: frame.session_id, type: 'step-start' },
       }) + '\n'
 
     case 'thinking':
@@ -36,7 +43,7 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'thinking',
         timestamp: ts,
         sessionID: sessionId,
-        part: { id: `part_${ts}_t`, messageID: `msg_${ts}_t`, sessionID: sessionId, type: 'reasoning', text: frame.content, time: { start: ts, end: ts + 1 } },
+        part: { id: `prt_${seq}`, messageID: `msg_thinking_${seq}`, sessionID: sessionId, type: 'reasoning', text: frame.content, time: { start: ts, end: ts + 1 } },
       }) + '\n'
 
     case 'text': {
@@ -50,7 +57,7 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'text',
         timestamp: ts,
         sessionID: sessionId,
-        part: { id: `part_${ts}_x`, messageID: `msg_${ts}_x`, sessionID: sessionId, type: 'text', text: frame.content, time: { start: ts, end: ts + 1 } },
+        part: { id: `prt_${seq}`, messageID: `msg_text_${seq}`, sessionID: sessionId, type: 'text', text: frame.content, time: { start: ts, end: ts + 1 } },
       }) + '\n'
     }
 
@@ -59,7 +66,7 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'tool_use',
         timestamp: ts,
         sessionID: sessionId,
-        part: { id: `part_${ts}_c`, messageID: `msg_${ts}_c`, sessionID: sessionId, type: 'tool_use', name: frame.name, input: frame.arguments, callID: frame.call_id },
+        part: { id: `prt_${seq}`, messageID: `msg_tool_${seq}`, sessionID: sessionId, type: 'tool_use', name: frame.name, input: frame.arguments, callID: frame.call_id },
       }) + '\n'
 
     case 'tool_result':
@@ -67,36 +74,41 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'tool_result',
         timestamp: ts,
         sessionID: sessionId,
-        part: { id: `part_${ts}_r`, messageID: `msg_${ts}_r`, sessionID: sessionId, type: 'tool_result', callID: frame.call_id, output: frame.output, isError: frame.is_error },
+        part: { id: `prt_${seq}`, messageID: `msg_tool_${seq}`, sessionID: sessionId, type: 'tool_result', callID: frame.call_id, output: frame.output, isError: frame.is_error },
       }) + '\n'
 
     case 'usage':
-      // Usage is included in step_finish, skip standalone
+      latestUsage = {
+        input_tokens: frame.input_tokens,
+        output_tokens: frame.output_tokens,
+        reasoning_tokens: frame.reasoning_tokens,
+        cache_read_tokens: frame.cache_read_tokens,
+        cache_write_tokens: frame.cache_write_tokens,
+      }
       return ''
 
     case 'result': {
-      const info: Record<string, unknown> = {
-        id: `msg_res_${ts}`,
-        role: 'assistant',
-        time: { created: ts, completed: ts + 1 },
-        sessionID: sessionId,
-        finish: frame.status === 'completed' ? 'stop' : 'error',
-      }
-      if (frame.output) {
-        info.summary = { text: frame.output.slice(0, 200) }
-      }
+      const tokens: Record<string, number> = {}
+      if (latestUsage.input_tokens) tokens.input = latestUsage.input_tokens
+      if (latestUsage.output_tokens) tokens.output = latestUsage.output_tokens
+      if (latestUsage.reasoning_tokens) tokens.reasoning = latestUsage.reasoning_tokens
+      const cache: Record<string, number> = {}
+      if (latestUsage.cache_read_tokens) cache.read = latestUsage.cache_read_tokens
+      if (latestUsage.cache_write_tokens) cache.write = latestUsage.cache_write_tokens
+      if (Object.keys(cache).length > 0) tokens.cache = cache as unknown as number
       return JSON.stringify({
         type: 'step_finish',
         timestamp: ts,
         sessionID: sessionId,
         part: {
-          id: `part_${ts}_f`,
+          id: `prt_${seq}`,
           reason: frame.status === 'completed' ? 'stop' : 'error',
-          messageID: `msg_${ts}_f`,
+          messageID: `msg_final_${seq}`,
           sessionID: sessionId,
           type: 'step-finish',
+          ...(Object.keys(tokens).length > 0 ? { tokens } : {}),
+          cost: 0,
         },
-        info,
       }) + '\n'
     }
 
@@ -105,8 +117,15 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
         type: 'step_finish',
         timestamp: ts,
         sessionID: sessionId,
-        part: { id: `part_${ts}_e`, reason: 'error', messageID: `msg_${ts}_e`, sessionID: sessionId, type: 'step-finish' },
-        info: { id: `msg_${ts}_e`, role: 'assistant', finish: 'error', sessionID: sessionId },
+        part: {
+          id: `prt_${seq}`,
+          reason: 'error',
+          messageID: `msg_err_${seq}`,
+          sessionID: sessionId,
+          type: 'step-finish',
+          tokens: {},
+          cost: 0,
+        },
       }) + '\n'
 
     default:
