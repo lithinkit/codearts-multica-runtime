@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import type { CodeArtsClient, Session } from './client.js'
 import { parseSSE, type SSEEvent } from './sse.js'
 import {
@@ -51,6 +52,28 @@ function extractSessionId(): string | undefined {
   return undefined
 }
 
+// Orchestration: fetch issue body, post results back
+const MCP_BIN = 'C:/Users/Administrator/.multica/bin/multica.exe'
+
+function fetchIssueBody(issueId: string): { title?: string; description?: string; status?: string } | null {
+  const r = spawnSync(MCP_BIN, ['issue', 'get', issueId, '--output', 'json'], { timeout: 15000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  if (r.status !== 0 || !r.stdout) return null
+  try {
+    const issue = JSON.parse(r.stdout)
+    return { title: issue.title, description: issue.description, status: issue.status }
+  } catch { return null }
+}
+
+function postComment(issueId: string, cwd: string, results: string): void {
+  const file = join(cwd, 'result.md')
+  try { writeFileSync(file, results, 'utf8') } catch { return }
+  try { spawnSync(MCP_BIN, ['issue', 'comment', 'add', issueId, '--content-file', file], { timeout: 30000, stdio: 'ignore' }) } catch { /* ignore */ }
+}
+
+function updateStatus(issueId: string, status: string): void {
+  try { spawnSync(MCP_BIN, ['issue', 'status', issueId, status], { timeout: 15000, stdio: 'ignore' }) } catch { /* ignore */ }
+}
+
 function writeFrame(frame: OutboundFrame): void {
   if (useOpenCode) {
     const oc = toOpenCodeFrame(frame)
@@ -70,6 +93,7 @@ interface ActiveRun {
   sessionId?: string
   lastText: string
   toolNames: Map<string, string>
+  issueId?: string
 }
 
 interface KernelPart {
@@ -415,7 +439,7 @@ export async function handleStdio(client: CodeArtsClient): Promise<number> {
     idleTimer = setTimeout(() => {
       if (captureDone) return
       captureDone = true
-      // Extract user message: lines after "User message:" until next blank line or ## section
+      // Extract user message from stdin
       let prompt = ''
       let captureMsg = false
       for (const line of stdinLines) {
@@ -428,6 +452,29 @@ export async function handleStdio(client: CodeArtsClient): Promise<number> {
       prompt = prompt.trim() || stdinLines.filter(l => l.trim() !== '').pop() || ''
       opencodeSetPrompt(prompt)
       const cwd = extractCwd()
+      let issueId = ''
+      // Detect issue task: fetch full body for richer context
+      for (const line of stdinLines) {
+        const m = line.match(/Your assigned issue ID is:\s*([a-f0-9-]+)/i)
+        if (m) { issueId = m[1]; break }
+      }
+      if (issueId) {
+        const issueData = fetchIssueBody(issueId)
+        if (issueData) {
+          const status = issueData.status || ''
+          if (status === 'in_review' || status === 'done' || status === 'cancelled') {
+            // Already completed — skip re-execution
+            writeDiagnostic(`[ORCHESTRATE] issue=${issueId} already ${status}, skipping`)
+            issueId = '' // Don't execute
+          } else {
+            const body = [issueData.title, issueData.description].filter(Boolean).join('\n\n')
+            if (body) {
+              prompt = `Execute the following task step by step using bash/webfetch/read tools. SKIP all file-writing instructions — reply with TEXT ONLY. Give results directly in your response.\n\n${body}`
+              writeDiagnostic(`[ORCHESTRATE] issue=${issueId} status=${status} body_len=${body.length}`)
+            }
+          }
+        }
+      }
       const command: ExecuteCommand = {
         v: PROTOCOL_VERSION,
         type: 'execute',
@@ -438,7 +485,7 @@ export async function handleStdio(client: CodeArtsClient): Promise<number> {
         ...(extractSessionId() ? { resume_session_id: extractSessionId() } : {}),
       }
       writeDiagnostic(`[EXEC] cwd=${cwd} prompt_len=${prompt.length}`)
-      const active: ActiveRun = { command, cancelRequested: false, lastText: '', toolNames: new Map() }
+      const active: ActiveRun = { command, cancelRequested: false, lastText: '', toolNames: new Map(), issueId }
       activeRef.current = active
       if (resolveExecute) {
         const rc = resolveExecute; resolveExecute = undefined; rejectExecute = undefined; rc(command)
@@ -460,6 +507,19 @@ export async function handleStdio(client: CodeArtsClient): Promise<number> {
   if (active === undefined) return 1
 
   const code = await handleExecute(client, active)
+  // Orchestration: post agent results back to issue
+  if (active.issueId && active.lastText.trim()) {
+    try {
+      const report = active.lastText.trim()
+      writeDiagnostic(`[ORCHESTRATE] posting result to issue=${active.issueId} len=${report.length}`)
+      const workdir = extractCwd()
+      postComment(active.issueId, workdir, report)
+      // Set to in_review only for new completions (not re-triggers)
+      updateStatus(active.issueId, 'in_review')
+    } catch (e: unknown) {
+      writeDiagnostic(`[ORCHESTRATE] post failed: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
   activeRef.finished = true
   input.close()
   return code
