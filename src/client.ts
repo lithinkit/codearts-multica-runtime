@@ -106,7 +106,7 @@ export class CodeArtsClient {
   }
 
   async createSession(cwd: string): Promise<Session> {
-    // Query param is how kernel sets session directory
+    // Query param is how kernel sets session directory (for model resolution)
     const dir = cwd.replace(/\\/g, '/')
     const data = await this.request<CodeArtsSession>(`/cag/session?directory=${encodeURIComponent(dir)}`, {
       method: 'POST',
