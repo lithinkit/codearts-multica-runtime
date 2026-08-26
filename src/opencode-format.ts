@@ -62,20 +62,9 @@ export function toOpenCodeFrame(frame: OutboundFrame): string {
     }
 
     case 'tool_call':
-      return JSON.stringify({
-        type: 'tool_use',
-        timestamp: ts,
-        sessionID: sessionId,
-        part: { id: `prt_${seq}`, messageID: `msg_tool_${seq}`, sessionID: sessionId, type: 'tool_use', name: frame.name, input: frame.arguments, callID: frame.call_id },
-      }) + '\n'
-
     case 'tool_result':
-      return JSON.stringify({
-        type: 'tool_result',
-        timestamp: ts,
-        sessionID: sessionId,
-        part: { id: `prt_${seq}`, messageID: `msg_tool_${seq}`, sessionID: sessionId, type: 'tool_result', callID: frame.call_id, output: frame.output, isError: frame.is_error },
-      }) + '\n'
+      // Kernel handles tools internally; don't forward to opencode daemon
+      return ''
 
     case 'usage':
       latestUsage = {
